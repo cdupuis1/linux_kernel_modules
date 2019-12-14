@@ -145,6 +145,7 @@ static void __exit blk_example_exit(void) {
 	del_gendisk(blk_ex.disk);
 	blk_cleanup_queue(blk_ex.rq_queue);
 	blk_mq_free_tag_set(&blk_ex.tagset);
+	put_disk(blk_ex.disk);
 	blk_unregister_region(MKDEV(blk_example_major, 0), 1);
 	unregister_blkdev(blk_example_major, DRV_NAME);
 }
