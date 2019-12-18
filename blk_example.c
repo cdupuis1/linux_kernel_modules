@@ -17,6 +17,7 @@ blk_example blk_ex;
 static blk_status_t blk_example_queue_rq(struct blk_mq_hw_ctx *hctx,
 	const struct blk_mq_queue_data *bd)
 {
+	pr_info("%s(): Entered\n", __func__);
 	return BLK_STS_IOERR;
 }
 
@@ -30,7 +31,6 @@ static const struct blk_mq_ops blk_example_ops = {
 
 static struct kobject *blk_example_probe(dev_t dev, int *part, void *data)
 {
-	pr_info("%s(): Entered\n", __func__);
 	return NULL;
 }
 
@@ -40,11 +40,14 @@ static struct kobject *blk_example_probe(dev_t dev, int *part, void *data)
 
 static int blk_example_open(struct block_device *bdev, fmode_t mode)
 {
+	pr_info("%s(): Entered\n", __func__);
 	return 0;
 }
 
 static void blk_example_release(struct gendisk *disk, fmode_t mode)
-{}
+{
+	pr_info("%s(): Entered\n", __func__);
+}
 
 static int blk_example_ioctl(struct block_device *bdev, fmode_t mode,
 	unsigned int cmd, unsigned long arg)
@@ -81,6 +84,7 @@ static int __init blk_example_init(void) {
 	blk_ex.tagset.queue_depth = 1;
 	blk_ex.tagset.numa_node = NUMA_NO_NODE;
 	blk_ex.tagset.cmd_size = sizeof(blk_example_cmd);
+	blk_ex.tagset.timeout = BLK_EX_TMO;
 	blk_ex.tagset.driver_data = &blk_ex;
 
 	rc = blk_mq_alloc_tag_set(&blk_ex.tagset);
@@ -124,6 +128,11 @@ static int __init blk_example_init(void) {
 	blk_ex.disk->private_data = &blk_ex;
 	blk_ex.disk->queue = blk_ex.rq_queue;
 	sprintf(blk_ex.disk->disk_name, "blk_example");
+
+	/* Set in number of 1k byte sectors */
+	set_capacity(blk_ex.disk, BLK_EX_SIZE);
+
+	/* Announce to the world that I'm here */
 	add_disk(blk_ex.disk);
 
 	return 0;
