@@ -1,9 +1,18 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ * Copyright (C) 2019 Chad Dupuis
+ *
+ * Example multiqueue block driver mainly for understanding how a block
+ * driver works.
+ */
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/genhd.h>
 #include <linux/numa.h>
+#include <linux/vmalloc.h>
 #include "blk_example.h"
 
 MODULE_LICENSE("GPL");
@@ -14,15 +23,58 @@ MODULE_VERSION("1");
 int blk_example_major;
 blk_example blk_ex;
 
+static void blk_example_complete(struct work_struct *work)
+{
+	struct req_iterator iter;
+	struct bio_vec bvec;
+	blk_example_cmd *cmd =
+		container_of(work, blk_example_cmd, work);
+	sector_t sector = blk_rq_pos(cmd->req);
+
+	pr_info("%s(): Entered\n", __func__);
+
+	rq_for_each_segment(bvec, cmd->req, iter) {
+		pr_info("%s(): page=%p sector=%llu len=%d offset=%d\n", __func__,
+			page_address(bvec.bv_page), sector,  bvec.bv_len,
+			bvec.bv_offset);
+	}
+
+	/* We're always sunshine and lollipops */
+	cmd->status = BLK_STS_OK;
+
+	blk_mq_complete_request(cmd->req);
+}
+
 static blk_status_t blk_example_queue_rq(struct blk_mq_hw_ctx *hctx,
 	const struct blk_mq_queue_data *bd)
 {
+	struct request *rq = bd->rq;
+	blk_example_cmd *cmd = blk_mq_rq_to_pdu(rq);
+
 	pr_info("%s(): Entered\n", __func__);
-	return BLK_STS_IOERR;
+
+	/* Tell the block layer we've started processing this request */
+	blk_mq_start_request(rq);
+
+	/* Save the requst back pointer */
+	cmd->req = rq;
+
+	/* Queue the actual copy and completion to a work queue */
+	INIT_WORK(&cmd->work, blk_example_complete);
+	schedule_work(&cmd->work);
+
+	return BLK_STS_OK;
 }
 
 static void blk_example_complete_rq(struct request *rq)
-{}
+{
+	blk_example_cmd *cmd = blk_mq_rq_to_pdu(rq);
+
+	pr_info("%s(): Entered\n", __func__);
+
+	cmd->req = NULL;
+	blk_mq_end_request(rq, cmd->status);
+}
 
 static const struct blk_mq_ops blk_example_ops = {
 	.queue_rq = blk_example_queue_rq,
@@ -66,6 +118,12 @@ static int __init blk_example_init(void) {
 	int rc;
 	int retval;
 
+	blk_ex.store = vmalloc(BLK_EX_SIZE * 512);
+	if (!blk_ex.store) {
+		pr_info("%s(): store is NULL\n", __func__);
+		return -ENOMEM;
+	}
+
 	rc = register_blkdev(0, DRV_NAME);
 	if (rc < 0) {
 		pr_warn("%s(): register_blkdev() failed rc=%d\n", __func__, rc);
@@ -81,7 +139,7 @@ static int __init blk_example_init(void) {
 	/* Set up tagset with basic definitions about our queue size and metadata */
 	blk_ex.tagset.ops = &blk_example_ops;
 	blk_ex.tagset.nr_hw_queues = 1;
-	blk_ex.tagset.queue_depth = 1;
+	blk_ex.tagset.queue_depth = BLK_EX_Q_DEPTH;
 	blk_ex.tagset.numa_node = NUMA_NO_NODE;
 	blk_ex.tagset.cmd_size = sizeof(blk_example_cmd);
 	blk_ex.tagset.timeout = BLK_EX_TMO;
@@ -157,6 +215,7 @@ static void __exit blk_example_exit(void) {
 	put_disk(blk_ex.disk);
 	blk_unregister_region(MKDEV(blk_example_major, 0), 1);
 	unregister_blkdev(blk_example_major, DRV_NAME);
+	vfree(blk_ex.store);
 }
 
 module_init(blk_example_init);

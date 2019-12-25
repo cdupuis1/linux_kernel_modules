@@ -1,18 +1,30 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ * Copyright (C) 2019 Chad Dupuis
+ */
 #include <linux/blk-mq.h>
+#include <linux/mutex.h>
+#include <linux/workqueue.h>
 
 #define DRV_NAME        "blk_example"
 
-#define BLK_EX_TMO		(60 * HZ)
+#define BLK_EX_TMO		(5 * HZ)
 
-/* Number of sectors */
-#define BLK_EX_SIZE		1000
+/* Number of 512 byte sectors */
+#define BLK_EX_SIZE		2000
+
+#define BLK_EX_Q_DEPTH      16
+
+typedef struct {
+    struct work_struct work;
+    blk_status_t status;
+    struct request *req; /* Back pointer to request */
+} blk_example_cmd;
+
 typedef struct {
     struct blk_mq_tag_set tagset;
     struct request_queue *rq_queue;
     struct gendisk *disk;
-    struct kobject *kobj;
+    void *store;
 } blk_example;
-
-typedef struct {
-    uint8_t info;
-} blk_example_cmd;
