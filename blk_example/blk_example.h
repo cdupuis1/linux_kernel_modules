@@ -27,4 +27,5 @@ typedef struct {
     struct request_queue *rq_queue;
     struct gendisk *disk;
     void *store;
+    struct mutex store_mutex;
 } blk_example;

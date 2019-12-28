@@ -16,13 +16,21 @@
 #include "blk_example.h"
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Yakko Warner");
+MODULE_AUTHOR("Chad Dupuis");
 MODULE_DESCRIPTION("Sample Block Driver");
 MODULE_VERSION("1");
 
 int blk_example_major;
 blk_example blk_ex;
 
+unsigned int num_sectors;
+module_param(num_sectors, uint, S_IRUGO);
+
+/*
+ * Work queue callback to perform the deferred processing of a request. This
+ * is where the real work of processing the bio_vec's in the request to copy
+ * data to/from the backing memory store.
+ */
 static void blk_example_complete(struct work_struct *work)
 {
 	struct req_iterator iter;
@@ -30,28 +38,52 @@ static void blk_example_complete(struct work_struct *work)
 	blk_example_cmd *cmd =
 		container_of(work, blk_example_cmd, work);
 	sector_t sector = blk_rq_pos(cmd->req);
+	void *store_addr, *page_addr;
 
-	pr_info("%s(): Entered\n", __func__);
+	/*
+	 * Actual address into the store depends on which sector we're read/
+	 * writing to.
+	 */
+	store_addr = blk_ex.store + sector * 512;
 
+	mutex_lock(&blk_ex.store_mutex);
 	rq_for_each_segment(bvec, cmd->req, iter) {
-		pr_info("%s(): page=%p sector=%llu len=%d offset=%d\n", __func__,
-			page_address(bvec.bv_page), sector,  bvec.bv_len,
-			bvec.bv_offset);
+		/* Get memory of address to use in memcpy */
+		page_addr = kmap_atomic(bvec.bv_page);
+		if (page_addr == NULL) {
+			cmd->status = BLK_STS_IOERR;
+			mutex_unlock(&blk_ex.store_mutex);
+			goto out;
+		}
+
+		/* Adjust page address based on offset in bio_vec */
+		page_addr = page_addr + bvec.bv_offset;
+		if (op_is_write(req_op(cmd->req))) {
+			memcpy(store_addr, page_addr, bvec.bv_len);
+		} else {
+			memcpy(page_addr, store_addr, bvec.bv_len);
+		}
+
+		/* Update the address of the store based on the length */
+		store_addr = store_addr + bvec.bv_len;
+		kunmap_atomic(page_addr);
 	}
+	mutex_unlock(&blk_ex.store_mutex);
 
 	/* We're always sunshine and lollipops */
 	cmd->status = BLK_STS_OK;
 
+out:
+	/* Tell the block layer we're doing with the i/o */
 	blk_mq_complete_request(cmd->req);
 }
 
+/* Callback block layer uses to queue a request to our driver */
 static blk_status_t blk_example_queue_rq(struct blk_mq_hw_ctx *hctx,
 	const struct blk_mq_queue_data *bd)
 {
 	struct request *rq = bd->rq;
 	blk_example_cmd *cmd = blk_mq_rq_to_pdu(rq);
-
-	pr_info("%s(): Entered\n", __func__);
 
 	/* Tell the block layer we've started processing this request */
 	blk_mq_start_request(rq);
@@ -66,13 +98,13 @@ static blk_status_t blk_example_queue_rq(struct blk_mq_hw_ctx *hctx,
 	return BLK_STS_OK;
 }
 
+/* Callback for when the block layer completes a request */
 static void blk_example_complete_rq(struct request *rq)
 {
 	blk_example_cmd *cmd = blk_mq_rq_to_pdu(rq);
 
-	pr_info("%s(): Entered\n", __func__);
-
 	cmd->req = NULL;
+	/* Tell block layer to complete this back to upper layers */
 	blk_mq_end_request(rq, cmd->status);
 }
 
@@ -92,14 +124,11 @@ static struct kobject *blk_example_probe(dev_t dev, int *part, void *data)
 
 static int blk_example_open(struct block_device *bdev, fmode_t mode)
 {
-	pr_info("%s(): Entered\n", __func__);
 	return 0;
 }
 
 static void blk_example_release(struct gendisk *disk, fmode_t mode)
-{
-	pr_info("%s(): Entered\n", __func__);
-}
+{}
 
 static int blk_example_ioctl(struct block_device *bdev, fmode_t mode,
 	unsigned int cmd, unsigned long arg)
@@ -118,7 +147,10 @@ static int __init blk_example_init(void) {
 	int rc;
 	int retval;
 
-	blk_ex.store = vmalloc(BLK_EX_SIZE * 512);
+	if (num_sectors == 0)
+		num_sectors = BLK_EX_SIZE;
+
+	blk_ex.store = vmalloc(num_sectors * 512);
 	if (!blk_ex.store) {
 		pr_info("%s(): store is NULL\n", __func__);
 		return -ENOMEM;
@@ -131,7 +163,6 @@ static int __init blk_example_init(void) {
 	}
 
 	blk_example_major = rc;
-	pr_info("%s(): Major number: %d\n", __func__, blk_example_major);
 
 	blk_register_region(MKDEV(blk_example_major, 0), 1, THIS_MODULE,
 		blk_example_probe, NULL, NULL);
@@ -188,10 +219,12 @@ static int __init blk_example_init(void) {
 	sprintf(blk_ex.disk->disk_name, "blk_example");
 
 	/* Set in number of 1k byte sectors */
-	set_capacity(blk_ex.disk, BLK_EX_SIZE);
+	set_capacity(blk_ex.disk, num_sectors);
 
 	/* Announce to the world that I'm here */
 	add_disk(blk_ex.disk);
+
+	mutex_init(&blk_ex.store_mutex);
 
 	return 0;
 
@@ -207,8 +240,6 @@ out_unreg_blk:
 }
 
 static void __exit blk_example_exit(void) {
-	pr_info("%s(): Enter\n", __func__);
-
 	del_gendisk(blk_ex.disk);
 	blk_cleanup_queue(blk_ex.rq_queue);
 	blk_mq_free_tag_set(&blk_ex.tagset);
