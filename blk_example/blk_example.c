@@ -10,9 +10,9 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
-#include <linux/genhd.h>
 #include <linux/numa.h>
 #include <linux/vmalloc.h>
+#include <linux/blkdev.h>
 #include "blk_example.h"
 
 MODULE_LICENSE("GPL");
@@ -113,11 +113,6 @@ static const struct blk_mq_ops blk_example_ops = {
 	.complete = blk_example_complete_rq
 };
 
-static struct kobject *blk_example_probe(dev_t dev, int *part, void *data)
-{
-	return NULL;
-}
-
 /*
  * Block file operation handlers
  */
@@ -163,9 +158,6 @@ static int __init blk_example_init(void) {
 	}
 
 	blk_example_major = rc;
-
-	blk_register_region(MKDEV(blk_example_major, 0), 1, THIS_MODULE,
-		blk_example_probe, NULL, NULL);
 	
 	/* Set up tagset with basic definitions about our queue size and metadata */
 	blk_ex.tagset.ops = &blk_example_ops;
@@ -183,13 +175,15 @@ static int __init blk_example_init(void) {
 		goto out_unreg_blk;
 	}
 
-	/* Alocate the block request queue based on the tag set */
-	blk_ex.rq_queue = blk_mq_init_queue(&blk_ex.tagset);
-	if (IS_ERR(&blk_ex.rq_queue)) {
-		pr_warn("%s(): Request queue allocation failed\n", __func__);
-		retval = -EINVAL;
-		goto out_clean_tags;
+	/* Allocate gendisk and block layer request queue */
+	blk_ex.disk = blk_mq_alloc_disk(&blk_ex.tagset, &blk_ex);
+	if (!blk_ex.disk) {
+		pr_warn("%s(): alloc_disk failed\n", __func__);
+		goto out_free_queue;
 	}
+
+	/* Set request queue back pointer*/
+	blk_ex.rq_queue = blk_ex.disk->queue;
 
 	/* Set backpointer for reference if needed */
 	blk_ex.rq_queue->queuedata = &blk_ex;
@@ -199,19 +193,10 @@ static int __init blk_example_init(void) {
 
 	/* Set no merges so that each request is it's own page */
 	blk_queue_flag_set(QUEUE_FLAG_NOMERGES, blk_ex.rq_queue);
-
-	/* 
-	 * Allocate the block lqyer gendisk structure with one partition
-	 * to fill in
-	 */
-	blk_ex.disk = alloc_disk(1);
-	if (!blk_ex.disk) {
-		pr_warn("%s(): alloc_disk failed\n", __func__);
-		goto out_free_queue;
-	}
 	
 	/* Setup gendisk object to call add_disk */
 	blk_ex.disk->major = blk_example_major;
+	blk_ex.disk->minors = 1;
 	blk_ex.disk->first_minor = 1;
 	blk_ex.disk->fops = &blk_ex_fops;
 	blk_ex.disk->private_data = &blk_ex;
@@ -222,18 +207,18 @@ static int __init blk_example_init(void) {
 	set_capacity(blk_ex.disk, num_sectors);
 
 	/* Announce to the world that I'm here */
-	add_disk(blk_ex.disk);
-
+	rc = add_disk(blk_ex.disk);
+	if (rc < 0) {
+		pr_warn("%s(): add_disk failed, rc=%d", __func__, rc);
+		goto out_free_queue;
+	}
 	mutex_init(&blk_ex.store_mutex);
 
 	return 0;
 
 out_free_queue:
-	blk_cleanup_queue(blk_ex.rq_queue);		
-out_clean_tags:
 	blk_mq_free_tag_set(&blk_ex.tagset);
 out_unreg_blk:
-	blk_unregister_region(MKDEV(blk_example_major, 0), 1);
 	unregister_blkdev(blk_example_major, DRV_NAME);
 
 	return retval;
@@ -241,10 +226,8 @@ out_unreg_blk:
 
 static void __exit blk_example_exit(void) {
 	del_gendisk(blk_ex.disk);
-	blk_cleanup_queue(blk_ex.rq_queue);
 	blk_mq_free_tag_set(&blk_ex.tagset);
 	put_disk(blk_ex.disk);
-	blk_unregister_region(MKDEV(blk_example_major, 0), 1);
 	unregister_blkdev(blk_example_major, DRV_NAME);
 	vfree(blk_ex.store);
 }
