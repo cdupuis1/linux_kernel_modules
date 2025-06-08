@@ -117,12 +117,12 @@ static const struct blk_mq_ops blk_example_ops = {
  * Block file operation handlers
  */
 
-static int blk_example_open(struct block_device *bdev, fmode_t mode)
+static int blk_example_open(struct gendisk *bdev, blk_mode_t mode)
 {
 	return 0;
 }
 
-static void blk_example_release(struct gendisk *disk, fmode_t mode)
+static void blk_example_release(struct gendisk *disk)
 {}
 
 static int blk_example_ioctl(struct block_device *bdev, fmode_t mode,
@@ -141,6 +141,10 @@ static const struct block_device_operations blk_ex_fops = {
 static int __init blk_example_init(void) {
 	int rc;
 	int retval;
+	struct queue_limits lim = {
+		/* Set max sector using queue_limits structure */
+		.max_hw_sectors = BLK_SAFE_MAX_SECTORS,
+	};
 
 	if (num_sectors == 0)
 		num_sectors = BLK_EX_SIZE;
@@ -176,7 +180,7 @@ static int __init blk_example_init(void) {
 	}
 
 	/* Allocate gendisk and block layer request queue */
-	blk_ex.disk = blk_mq_alloc_disk(&blk_ex.tagset, &blk_ex);
+	blk_ex.disk = blk_mq_alloc_disk(&blk_ex.tagset, &lim, &blk_ex);
 	if (!blk_ex.disk) {
 		pr_warn("%s(): alloc_disk failed\n", __func__);
 		goto out_free_queue;
@@ -187,9 +191,6 @@ static int __init blk_example_init(void) {
 
 	/* Set backpointer for reference if needed */
 	blk_ex.rq_queue->queuedata = &blk_ex;
-
-	/* Set default max sector parameter */
-	blk_queue_max_hw_sectors(blk_ex.rq_queue, BLK_DEF_MAX_SECTORS);
 
 	/* Set no merges so that each request is it's own page */
 	blk_queue_flag_set(QUEUE_FLAG_NOMERGES, blk_ex.rq_queue);
