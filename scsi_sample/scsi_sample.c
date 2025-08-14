@@ -7,6 +7,9 @@
 #include <linux/vmalloc.h>
 #include <linux/stdarg.h>
 #include <linux/device.h>
+#include <scsi/scsi_host.h>
+#include <scsi/scsi_cmnd.h>
+
 #include "scsi_sample.h"
 
 unsigned int size_in_mb;
@@ -21,6 +24,30 @@ static const char ss_proc_name[] = DRIVER_NAME;
 static struct device_driver ss_driverfs_driver = {
     .name = ss_proc_name,
     .bus = &chad_lld_bus,
+};
+
+static int scsi_sample_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *cmd)
+{
+    SS_DEBUG_INFO("cmd opcode=0x%x", cmd->cmnd[0]);
+
+    // Return DID_NO_CONNECT for now as we can't process any commands
+    cmd->result = DID_NO_CONNECT << 16;
+    scsi_done(cmd);
+    return 0;
+}
+
+static const struct scsi_host_template scsi_sample_template = {
+	.name =			"SCSI_SAMPLE",
+	.queuecommand =		scsi_sample_queuecommand,
+	.can_queue =		1,
+	.this_id =		7,
+	.sg_tablesize =		SG_MAX_SEGMENTS,
+	.cmd_per_lun =		1,
+	.max_sectors =		-1U,
+	.max_segment_size =	-1U,
+	.module =		THIS_MODULE,
+	.skip_settle_delay =	1,
+	.track_queue_depth =	0,
 };
 
 static void scsi_sample_device_release(struct device *dev)
@@ -130,17 +157,56 @@ module_exit(scsi_sample_exit);
 
 static int scsi_sample_probe(struct device *dev)
 {
+    int rval = 0;
+
     SS_DEBUG_INFO("%s(): Entered", __func__);
 
-    /* Add scsi host alloc/add code here */
+    ss.shost = scsi_host_alloc(&scsi_sample_template, 0);
+    if (ss.shost == NULL) {
+        SS_DEBUG_WARN("scsi_host_alloc failed");
+        rval = -ENODEV;
+        goto out;
+    }
+
+    /* Set dma boundary to PAGE_SIZE - 1 so we don't get multiple pages */
+    ss.shost->dma_boundary = PAGE_SIZE - 1;
+
+    /* No SCSI multiqueue */
+    ss.shost->nr_hw_queues = 1;
+
+    /* Just one target and lun */
+    ss.shost->max_id = 1;
+    ss.shost->max_lun = 1;
+
+    /* Add the host to the mid-layer*/
+    rval = scsi_add_host(ss.shost, &ss.dev);
+    if (rval)
+    {
+        SS_DEBUG_WARN("scsi_host_add failed %d", rval);
+        rval = -ENODEV;
+        goto free_scsi_host;
+    }
+
+    /* Start ur scanning! */
+    scsi_scan_host(ss.shost);
+
     return 0;
+
+free_scsi_host:
+    scsi_host_put(ss.shost);
+out:
+    return rval;
 }
 
 static void scsi_sample_remove(struct device *dev)
 {
     SS_DEBUG_INFO("%s(): Entered", __func__);
 
-    /* Add scsi host remove code here */
+    // Remove shost
+    scsi_remove_host(ss.shost);
+
+    // Free Scsi_Host
+    scsi_host_put(ss.shost);
 }
 
 static const struct bus_type chad_lld_bus = {

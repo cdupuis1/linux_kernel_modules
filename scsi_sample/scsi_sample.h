@@ -1,5 +1,6 @@
 #ifndef _SCSI_SAMPLE_H_
 #define _SCSI_SAMPLE_H_
+#include <scsi/scsi_host.h>
 
 /* Default size in MB */
 #define SCSI_SAMPLE_DEFAULT_SIZE        100
@@ -19,6 +20,7 @@ struct scsi_sample {
     void *backing_store;
     struct device *fake_root_device;
     struct device dev;
+    struct Scsi_Host *shost;
 };
 
 #endif
